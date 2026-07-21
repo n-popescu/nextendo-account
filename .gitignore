@@ -1,0 +1,15 @@
+# Build outputs
+*.exe
+*.linux
+/bin/
+/dist/
+# Runtime state & secrets — NEVER commit
+/data/
+.env
+!example.env
+*.pem
+*.key
+internal_key.txt
+accounts.json
+sessions.json
+bans.json
