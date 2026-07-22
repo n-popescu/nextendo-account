@@ -259,6 +259,7 @@ func (s *server) adminBan(w http.ResponseWriter, r *http.Request) {
 		PID    uint64 `json:"pid"`
 		Reason string `json:"reason"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.PID == 0 {
 		writeErr(w, http.StatusBadRequest, "pid requis")
 		return
@@ -283,6 +284,7 @@ func (s *server) adminUnban(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		PID uint64 `json:"pid"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.PID == 0 {
 		writeErr(w, http.StatusBadRequest, "pid requis")
 		return

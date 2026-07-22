@@ -56,6 +56,7 @@ func (s *server) adminDiscordLink(w http.ResponseWriter, r *http.Request) {
 		DiscordID       string `json:"discord_id"`
 		DiscordUsername string `json:"discord_username"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.PID == 0 {
 		writeErr(w, http.StatusBadRequest, "pid requis")
 		return

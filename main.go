@@ -1,5 +1,8 @@
 // Nextendo Network — account service.
 //
+// TODO(Q-HIGH-1): This file has grown to 2800+ lines (HTTP handlers, BAAS logic, friends,
+// sessions, all in package main). Split into packages (/baas, /friends, /sessions, /internal).
+//
 // This is the account layer that sits in FRONT of the
 // existing dauth/aauth/baas + NEX stack. It serves:
 //   - the public website (static/)
@@ -36,6 +39,35 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+// setTokenCookie sets the web session token as an HttpOnly, Secure, SameSite=Strict
+// cookie on the response. This replaces localStorage-based token storage and prevents
+// XSS-based token theft.
+func setTokenCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "nx_token",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   30 * 24 * 3600, // 30 days, matches signToken expiry
+	})
+}
+
+// tokenFromRequest extracts the web session token from the Authorization header
+// first, falling back to the nx_token cookie. This allows a gradual migration from
+// Bearer-header auth to HttpOnly-cookie auth — the cookie path is the intended
+// secure storage (not directly readable by JS).
+func tokenFromRequest(r *http.Request) string {
+	if tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); tok != "" {
+		return tok
+	}
+	if c, err := r.Cookie("nx_token"); err == nil && c.Value != "" {
+		return c.Value
+	}
+	return ""
+}
 
 // ---------------------------------------------------------------------------
 // Model
@@ -903,8 +935,10 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 	sendVerificationEmail(acct) // e-mail de confirmation (ou lien loggé en mode dev)
 	sess := newSession(acct.PID, "browser", clientIP(r), r.UserAgent())
 	log.Printf("[register] %s pid=%d code=%s", acct.Username, acct.PID, acct.FriendCode)
+	token := signToken(acct.ID, sess.ID)
+	setTokenCookie(w, token)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":     signToken(acct.ID, sess.ID),
+		"token":     token,
 		"nex_token": signNexToken(acct.PID, acct.Username),
 		"account":   acct.Public(),
 	})
@@ -941,8 +975,10 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := newSession(acct.PID, "browser", clientIP(r), r.UserAgent())
 	log.Printf("[login] %s pid=%d", acct.Username, acct.PID)
+	token := signToken(acct.ID, sess.ID)
+	setTokenCookie(w, token)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":     signToken(acct.ID, sess.ID),
+		"token":     token,
 		"nex_token": signNexToken(acct.PID, acct.Username),
 		"account":   acct.Public(),
 	})
@@ -1068,8 +1104,7 @@ func (s *server) resetPassword(w http.ResponseWriter, r *http.Request) {
 // sessions lists the account's active sessions (navigateur / Ryujinx / Switch) with IP +
 // géo, en marquant celle qui fait la requête comme "current".
 func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	id, sid, ok := verifyTokenFull(tok)
+	id, sid, ok := verifyTokenFull(tokenFromRequest(r))
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
 		return
@@ -1089,8 +1124,7 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 
 // revokeSessionHandler révoque UNE session par id (doit appartenir au compte appelant).
 func (s *server) revokeSessionHandler(w http.ResponseWriter, r *http.Request) {
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	id, _, ok := verifyTokenFull(tok)
+	id, _, ok := verifyTokenFull(tokenFromRequest(r))
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
 		return
@@ -1119,8 +1153,7 @@ func (s *server) revokeSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 // revokeAllSessions ferme TOUTES les sessions du compte — y compris le navigateur courant.
 func (s *server) revokeAllSessions(w http.ResponseWriter, r *http.Request) {
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	id, _, ok := verifyTokenFull(tok)
+	id, _, ok := verifyTokenFull(tokenFromRequest(r))
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
 		return
@@ -1335,8 +1368,7 @@ func (s *server) nexSession(w http.ResponseWriter, r *http.Request) {
 // emulator's account/auth layer; the NEX auth server validates it and uses the
 // account's persistent PID.
 func (s *server) nexToken(w http.ResponseWriter, r *http.Request) {
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	id, ok := verifyToken(tok)
+	id, ok := verifyToken(tokenFromRequest(r))
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
 		return
@@ -1523,8 +1555,7 @@ func (s *server) betaConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) me(w http.ResponseWriter, r *http.Request) {
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	id, ok := verifyToken(tok)
+	id, ok := verifyToken(tokenFromRequest(r))
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
 		return
@@ -1589,7 +1620,7 @@ func (s *server) profile(w http.ResponseWriter, r *http.Request) {
 // accountFromBearer resolves the authenticated account from either a web session
 // token or the persisted NEX token (nx2.…).
 func (s *server) accountFromBearer(r *http.Request) (*Account, bool) {
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	tok := tokenFromRequest(r)
 	// Un compte DÉSACTIVÉ garde un jeton valide jusqu'à 30 jours : ne vérifier Disabled
 	// qu'à la connexion laissait un compte gelé continuer à utiliser toute l'API (profil,
 	// amis, sauvegardes) et à se forger des jetons de jeu. On refuse ici aussi.
@@ -2303,7 +2334,7 @@ func (s *server) bcat(w http.ResponseWriter, r *http.Request) {
 // Auth (Bearer session OR nex token) gates the feature to Nextendo users. Archives are
 // streamed both ways so the 1.6 GB-class PPTC files never get buffered in memory.
 func (s *server) cache(w http.ResponseWriter, r *http.Request) {
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	tok := tokenFromRequest(r)
 	_, okSession := verifyToken(tok)
 	_, okNex := verifyNexToken(tok)
 	if !okSession && !okNex {
@@ -2407,7 +2438,7 @@ func (s *server) cache(w http.ResponseWriter, r *http.Request) {
 // mod folder. Only admin-curated, cosmetic/local mods live here.
 func (s *server) mods(w http.ResponseWriter, r *http.Request) {
 	// Require a linked Nextendo account: the Mod Store is reserved to connected players.
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	tok := tokenFromRequest(r)
 	_, okSession := verifyToken(tok)
 	_, okNex := verifyNexToken(tok)
 	if !okSession && !okNex {

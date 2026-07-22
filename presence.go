@@ -102,6 +102,7 @@ func (s *server) presence(w http.ResponseWriter, r *http.Request) {
 		AppId     string `json:"app_id"`     // titre du jeu courant (générique) — le fork le remonte
 		AppDetail string `json:"app_detail"` // mode issu du play report du jeu (« Single Player »…), souvent vide
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "JSON invalide")
 		return
