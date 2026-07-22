@@ -1284,6 +1284,26 @@ func (s *server) evalOnlineGatesWithSelf(pid uint64, kind, ip string) (string, b
 	return reason, allow
 }
 
+// gateMessage maps an evalOnlineGates reason to a user-facing message (French,
+// matching the site/emulator locale). The emulator shows this in its UI instead
+// of letting the Switch display a cryptic error code like 2124-3121.
+func gateMessage(reason string) string {
+	switch reason {
+	case "unknown":
+		return "Ce compte Nextendo n'existe pas. Vérifie ton identifiant de connexion."
+	case "disabled":
+		return "Ce compte est désactivé. Contacte l'équipe Nextendo pour plus d'informations."
+	case "unverified":
+		return "Ton adresse e-mail n'a pas encore été confirmée. Vérifie ta boîte de réception (y compris les spams) et clique sur le lien de confirmation. Tu peux aussi demander un nouveau lien depuis la page Connexion du site Nextendo."
+	case "discord_unlinked":
+		return "Ton compte Nextendo doit être lié au serveur Discord pour jouer en ligne. Rejoins le Discord Nextendo et lie ton compte depuis ton profil."
+	case "elsewhere":
+		return "Tu joues déjà sur un autre appareil (Switch ou Ryujinx). Ferme la session en cours pour pouvoir te connecter ici."
+	default:
+		return ""
+	}
+}
+
 func (s *server) onlineStatus(w http.ResponseWriter, r *http.Request) {
 	acct, ok := s.accountFromBearer(r)
 	if !ok {
@@ -1296,7 +1316,7 @@ func (s *server) onlineStatus(w http.ResponseWriter, r *http.Request) {
 		kind = se.Kind
 	}
 	reason, allow := s.evalOnlineGatesWithSelf(acct.PID, kind, clientIP(r))
-	writeJSON(w, http.StatusOK, map[string]any{"allow": allow, "reason": reason})
+	writeJSON(w, http.StatusOK, map[string]any{"allow": allow, "reason": reason, "message": gateMessage(reason)})
 }
 
 func (s *server) onlineCheck(w http.ResponseWriter, r *http.Request) {
