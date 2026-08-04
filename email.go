@@ -102,7 +102,7 @@ func sendMail(to, subject, htmlBody string) error {
 // sendPlainRelay hands the message to a no-auth SMTP relay — the VPS host's Postfix,
 // reachable on the Docker bridge gateway (mynetworks trusts the container subnet).
 // Plaintext, no STARTTLS, no AUTH; deliverability (DKIM signing, queuing, MX
-// delivery) is Postfix + OpenDKIM's job. Mirrors the ScanVerse nodemailer setup.
+// delivery) is Postfix + OpenDKIM's job.
 func sendPlainRelay(c smtpConfig, to, msg string) error {
 	cl, err := smtp.Dial(net.JoinHostPort(c.host, c.port))
 	if err != nil {

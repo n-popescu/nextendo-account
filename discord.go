@@ -124,7 +124,7 @@ func discordLinkRequired() bool {
 }
 
 // botServiceURL / botServiceKey : comment joindre le bot de vérif pour lui relayer un ban.
-// Le bot tourne sur le même réseau docker (coolify) que nous.
+// Le bot tourne sur le même réseau docker interne que nous.
 func botServiceURL() string {
 	if v := strings.TrimSpace(os.Getenv("NEXTENDO_BOT_URL")); v != "" {
 		return strings.TrimRight(v, "/")
