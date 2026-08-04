@@ -1,12 +1,12 @@
 package main
 
-// Sert le save "delivery-cache" BCAT d'un titre au homebrew Nextendo, VERBATIM depuis un
-// bundle de cache (bcat_store/<titleId>.cache.zip). Un tel cache contient, en plus des
+// Sert le save "delivery-cache" BCAT d'un titre au homebrew Nextendo, VERBATIM depuis un vrai
+// cache dumpe (bcat_store/<titleId>.cache.zip). Le vrai cache Nintendo contient, en plus des
 // byaml, des fichiers de tete que S2 EXIGE pour accepter le cache :
 //   directories.meta · etag.bin · list.msgpack · na_required · directories/<topic>/files.meta
 //   · directories/<topic>/files/<payload>  (+ un dossier "dummy")
-// On relaie donc l'arbre TEL QUEL (aucun calcul de digest cote serveur) -> l'install ecrit le
-// cache attendu -> S2 l'accepte. passphrase.bin est cree par S2 (exclu, preserve
+// On relaie donc l'arbre TEL QUEL (aucun calcul de digest cote serveur) -> l'install ecrit une
+// copie exacte du cache Nintendo -> S2 l'accepte. passphrase.bin est cree par S2 (exclu, preserve
 // par le homebrew) ; .nx_save_meta.bin est un artefact JKSV (exclu).
 //
 // Bundle "NXBC" : "NXBC" | u32 count | count * [ u16 pathLen | path | u32 dataLen | data ]
@@ -27,11 +27,11 @@ import (
 const bcatBundleMagic = "NXBC"
 
 // Garde-fous du bundle. Le client homebrew concatène AVEUGLÉMENT chaque chemin qu'on lui envoie
-// au dossier de sauvegarde du jeu (audit path-traversal). Le serveur est, dans son
+// au dossier de sauvegarde du jeu (audit Prelude #3 : path traversal). Le serveur est, dans son
 // modèle de confiance, la seule autorité — il doit donc GARANTIR qu'il n'émet jamais un chemin
 // capable de sortir de l'arbre save, même si le cache source (bcat_store/<titleId>.cache.zip) est
 // un jour corrompu ou altéré. On échoue FERMÉ : un seul chemin suspect refuse tout le bundle
-// plutôt que d'en livrer un partiel (qu'un cache BCAT ne contient de toute façon jamais).
+// plutôt que d'en livrer un partiel (qu'un vrai cache Nintendo ne contient de toute façon jamais).
 const (
 	bcatMaxPathLen = 512
 	bcatMaxEntries = 20000
@@ -84,7 +84,7 @@ func buildBcatBundle(titleID string) ([]byte, error) {
 		if p == "" || bcatSkip[path.Base(p)] {
 			continue
 		}
-		// Ne JAMAIS relayer un chemin capable de sortir de l'arbre save. Un cache BCAT valide
+		// Ne JAMAIS relayer un chemin capable de sortir de l'arbre save. Un vrai cache Nintendo
 		// n'en contient pas ; si on en voit un, le cache est corrompu ou piégé -> on refuse tout.
 		if !safeBcatPath(p) {
 			return nil, fmt.Errorf("bcat: chemin refusé (path traversal) dans %s.cache.zip : %q", titleID, p)

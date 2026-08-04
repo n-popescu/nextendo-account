@@ -8,7 +8,7 @@ package main
 //
 // Nouvelle approche (demandée) : la SOURCE DE VÉRITÉ = les serveurs de jeu eux-mêmes. Chaque
 // serveur NEX expose /api/stats avec la liste des connexions PRUDP LIVE (c'est exactement ce
-// qu'affiche le monitoring). Règle simple :
+// qu'affiche le monitoring :8085). Règle simple :
 //   - le PID apparaît dans /api/stats d'un serveur  => il est connecté => on REFUSE toute
 //     nouvelle session (autre plateforme) ;
 //   - il n'apparaît nulle part => il s'est déconnecté => la place est LIBRE.
@@ -31,7 +31,7 @@ import (
 
 var gameStatsClient = &http.Client{Timeout: 2 * time.Second}
 
-// URLs internes des serveurs de jeu (mêmes que celles que poll le monitoring).
+// URLs internes des serveurs de jeu (mêmes que celles que poll le monitoring nexdash).
 func gameStatsURLs() []string {
 	env := func(k, d string) string {
 		if v := os.Getenv(k); v != "" {
@@ -40,10 +40,10 @@ func gameStatsURLs() []string {
 		return d
 	}
 	return []string{
-		env("DASH_MK8_URL", "http://localhost:8082"),
-		env("DASH_S2_URL", "http://localhost:8083"),
-		env("DASH_SSBU_URL", "http://localhost:8084"),
-		env("DASH_ACNH_URL", "http://localhost:8086"),
+		env("DASH_MK8_URL", "http://mk8nex:8082"),
+		env("DASH_S2_URL", "http://s2nex:8083"),
+		env("DASH_SSBU_URL", "http://ssbusecure:8084"),
+		env("DASH_ACNH_URL", "http://acnhnex-nexgo:8086"),
 	}
 }
 

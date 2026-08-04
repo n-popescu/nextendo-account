@@ -103,6 +103,25 @@ var gamesDB = map[string]gameCard{
 			{"wikipedia", "https://fr.wikipedia.org/wiki/Super_Smash_Bros._Ultimate"},
 		},
 	},
+	"0100c2500fc20000": {
+		Name:        "Splatoon 3",
+		Tagline:     "Encre, chaos et Turf War : bienvenue à Splatsville, la cité du chaos.",
+		Description: "Splatoon 3 est un jeu de tir à la troisième personne coloré où Inklings et Octalings s'affrontent en recouvrant l'arène d'encre lors de batailles de Guerre de Territoire en 4 contre 4. Il propose aussi un mode solo, le coopératif Salmon Run et des Festivals en ligne réguliers.",
+		Genres:      []string{"Tir à la 3e personne", "Action", "Multijoueur en ligne"},
+		Developer:   "Nintendo EPD",
+		Publisher:   "Nintendo",
+		ReleaseDate: "9 septembre 2022",
+		Platforms:   []string{"Nintendo Switch"},
+		Accent:      "#eab308",
+		Metacritic:  84,
+		Links: []gameLink{
+			{"website", "https://splatoon.nintendo.com/"},
+			{"x", "https://x.com/SplatoonNA"},
+			{"youtube", "https://www.youtube.com/@Nintendo"},
+			{"wikipedia", "https://fr.wikipedia.org/wiki/Splatoon_3"},
+		},
+	},
+
 	// ---------------------------------------------------------------------------
 	// Titres non-Nextendo les plus joués par les comptes (relevé sur le store
 	// history : classement par nombre de comptes distincts). Ils n'ont pas de

@@ -102,7 +102,6 @@ func (s *server) presence(w http.ResponseWriter, r *http.Request) {
 		AppId     string `json:"app_id"`     // titre du jeu courant (générique) — le fork le remonte
 		AppDetail string `json:"app_detail"` // mode issu du play report du jeu (« Single Player »…), souvent vide
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "JSON invalide")
 		return
@@ -112,7 +111,7 @@ func (s *server) presence(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /internal/presence-batch  {"status":int,"appId":"…","pids":[…]}
-// INTERNAL (co-located, no auth): the GAME SERVERS report which PIDs are
+// INTERNAL (co-located, no auth): the GAME SERVERS (s2secure, …) report which PIDs are
 // online NOW so friends see them ONLINE in the Switch friend list. Refreshed periodically;
 // a PID not re-reported within presenceTTL (90s) falls back to offline. This is the missing
 // presence SOURCE — the Ryujinx fork only posts presence for a private-battle HOST.

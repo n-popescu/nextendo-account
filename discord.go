@@ -39,9 +39,26 @@ func (s *jsonStore) SetDiscordLink(id int64, discordID, username string) error {
 	return s.persist()
 }
 
+// SetBooster met à jour le statut « booster du serveur Discord » d'un compte. Poussé par le bot
+// (qui voit le premium_since / le rôle booster du membre) en même temps que le lien. Un booster a
+// droit au cloud-save pour TOUS les jeux (voir le handler save), pas seulement les jeux Nextendo.
+func (s *jsonStore) SetBooster(id int64, isBooster bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.Accts[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if a.IsBooster == isBooster {
+		return nil // pas de changement : pas de réécriture disque
+	}
+	a.IsBooster = isBooster
+	return s.persist()
+}
+
 // adminDiscordLink : le bot de vérif pousse le lien après une vérification réussie, et rejoue tous
 // ses liens existants au démarrage (backfill). POST /api/admin/discord-link
-// {pid, discord_id, discord_username} — discord_id vide = délier.
+// {pid, discord_id, discord_username, is_booster} — discord_id vide = délier.
 // Auth : X-Admin-Key (bot) OU session admin.
 func (s *server) adminDiscordLink(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -55,8 +72,8 @@ func (s *server) adminDiscordLink(w http.ResponseWriter, r *http.Request) {
 		PID             uint64 `json:"pid"`
 		DiscordID       string `json:"discord_id"`
 		DiscordUsername string `json:"discord_username"`
+		IsBooster       bool   `json:"is_booster"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.PID == 0 {
 		writeErr(w, http.StatusBadRequest, "pid requis")
 		return
@@ -76,10 +93,24 @@ func (s *server) adminDiscordLink(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "échec enregistrement")
 		return
 	}
+	// Statut booster : seulement s'il reste lié (un délié n'est plus booster chez nous).
+	wasBooster := acct.IsBooster
+	booster := in.IsBooster && in.DiscordID != ""
+	if serr := s.store.SetBooster(acct.ID, booster); serr != nil {
+		log.Printf("[discord] pid=%d échec set booster: %v", in.PID, serr)
+	}
+	// Perte du statut booster → la limite retombe à 5 Mo : on nettoie l'excédent (jeux non-Nextendo
+	// puis, à défaut, compte à rebours de 3 j avant nettoyage auto). Hors du chemin critique.
+	// À l'inverse, (re)devenir booster lève immédiatement toute échéance de grâce en cours.
+	if wasBooster && !booster {
+		go s.applyBoosterDowngrade(acct)
+	} else if booster {
+		_ = s.store.SetCloudGrace(acct.ID, time.Time{})
+	}
 	if in.DiscordID == "" {
 		log.Printf("[discord] pid=%d délié", in.PID)
 	} else {
-		log.Printf("[discord] pid=%d lié à %s (%s)", in.PID, in.DiscordID, in.DiscordUsername)
+		log.Printf("[discord] pid=%d lié à %s (%s) booster=%v", in.PID, in.DiscordID, in.DiscordUsername, booster)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "pid": in.PID, "linked": in.DiscordID != ""})
 }
@@ -93,12 +124,12 @@ func discordLinkRequired() bool {
 }
 
 // botServiceURL / botServiceKey : comment joindre le bot de vérif pour lui relayer un ban.
-// Le bot tourne sur le même réseau interne que ce service.
+// Le bot tourne sur le même réseau docker (coolify) que nous.
 func botServiceURL() string {
 	if v := strings.TrimSpace(os.Getenv("NEXTENDO_BOT_URL")); v != "" {
 		return strings.TrimRight(v, "/")
 	}
-	return "http://localhost:8080"
+	return "http://nextendo-verify:8080"
 }
 
 func botServiceKey() string {

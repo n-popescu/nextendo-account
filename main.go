@@ -1,11 +1,8 @@
 // Nextendo Network — account service.
 //
-// TODO(Q-HIGH-1): This file has grown to 2800+ lines (HTTP handlers, BAAS logic, friends,
-// sessions, all in package main). Split into packages (/baas, /friends, /sessions, /internal).
-//
-// This is the account layer that sits in FRONT of the
+// This is the "Pretendo-for-Switch" account layer that sits in FRONT of the
 // existing dauth/aauth/baas + NEX stack. It serves:
-//   - the public website (static/)
+//   - the public website (static/, styled like pretendo.network)
 //   - a small JSON API for account creation + login
 //
 // An account = a persistent identity (username/email/password) mapped to a NEX
@@ -40,35 +37,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// setTokenCookie sets the web session token as an HttpOnly, Secure, SameSite=Strict
-// cookie on the response. This replaces localStorage-based token storage and prevents
-// XSS-based token theft.
-func setTokenCookie(w http.ResponseWriter, token string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     "nx_token",
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   30 * 24 * 3600, // 30 days, matches signToken expiry
-	})
-}
-
-// tokenFromRequest extracts the web session token from the Authorization header
-// first, falling back to the nx_token cookie. This allows a gradual migration from
-// Bearer-header auth to HttpOnly-cookie auth — the cookie path is the intended
-// secure storage (not directly readable by JS).
-func tokenFromRequest(r *http.Request) string {
-	if tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); tok != "" {
-		return tok
-	}
-	if c, err := r.Cookie("nx_token"); err == nil && c.Value != "" {
-		return c.Value
-	}
-	return ""
-}
-
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -89,12 +57,22 @@ type Account struct {
 	// Lien Discord poussé par le bot de vérif (voir discord.go). Le compte est la source de
 	// vérité : le gate online peut l'exiger, et un ban depuis le site sait qui bannir sur Discord.
 	DiscordID       string    `json:"discord_id,omitempty"`
+	IsBooster       bool      `json:"is_booster,omitempty"`
 	DiscordUsername string    `json:"discord_username,omitempty"`
 	DiscordLinkedAt time.Time `json:"discord_linked_at,omitempty"`
+	// Downgrade booster→non-booster en dépassement : échéance (now+3j) affichée dans l'espace perso
+	// pour que l'utilisateur redescende sous 5 Mo lui-même ; passé le délai, cloudGraceSweep()
+	// supprime automatiquement la/les save(s) la/les plus lourde(s). Zéro = pas de contrainte.
+	CloudGraceUntil time.Time `json:"cloud_grace_until,omitempty"`
 	Profile         *Profile  `json:"profile,omitempty"`         // synced in-game identity (nickname/avatar/Mii)
 	Friends         []uint64  `json:"friends,omitempty"`         // friend PIDs (mutual, accepted)
+	Favorites       []uint64  `json:"favorites,omitempty"`       // friend PIDs marqués favori (étoile) — synchro émulateur + site
 	FriendRequests  []uint64  `json:"friend_requests,omitempty"` // incoming request PIDs (pending)
 	Blocked         []uint64  `json:"blocked,omitempty"`         // PIDs this account blocked (no requests/friendship)
+
+	// Mods GameBanana mis en favori depuis le magasin de mods de l'émulateur, synchronisés
+	// au compte pour les retrouver d'un PC à l'autre. Voir mod_favorites.go.
+	ModFavorites []ModFavorite `json:"mod_favorites,omitempty"`
 
 	// Synthetic Nintendo-Account / BAAS ids served to a REAL CFW Switch so the
 	// console caches a NEXTENDO identity, NEVER the user's real Nintendo account.
@@ -107,7 +85,7 @@ type Account struct {
 }
 
 // Profile is the in-game identity bound to the account and synced by the
-// emulator (the account is authoritative, the console pulls it
+// emulator (Pretendo-style: the account is authoritative, the console pulls it
 // on login). Name = Switch profile nickname, Image = base64 JPEG avatar,
 // Mii = base64 of the Switch Mii blob (CharInfo/StoreData).
 type Profile struct {
@@ -135,6 +113,9 @@ func (a *Account) Public() map[string]any {
 		// n'est donc montré qu'à son propriétaire, sur /compte.
 		"discord":           a.DiscordUsername,
 		"discord_linked_at": discordLinkedAtStr(a),
+		// Booster du serveur Discord (poussé par le bot) : débloque le cloud-save tous-jeux et le
+		// badge « MEMBRE BOOSTER » rose sur l'espace perso.
+		"isBooster": a.IsBooster,
 	}
 }
 
@@ -209,16 +190,25 @@ type Store interface {
 	SetDisabled(id int64, disabled bool) error                            // gel de relance : ferme/rouvre un compte
 	SetRegIP(id int64, ip string) error                                   // ban : capture l'IP d'inscription (réservée au ban)
 	SetDiscordLink(id int64, discordID, username string) error            // lien Discord poussé par le bot (gate online + ban miroir)
+	SetBooster(id int64, isBooster bool) error                            // statut booster Discord poussé par le bot (cloud-save tous-jeux)
+	SetCloudGrace(id int64, until time.Time) error                        // downgrade booster : échéance de nettoyage cloud (zéro = efface)
+	AllWithCloudGrace() []*Account                                        // comptes avec une échéance de grâce cloud en attente (balayage)
 	LockdownExcept(keepPID uint64) (int, error)                           // ferme TOUS les comptes sauf keepPID (et le vérifie/rouvre)
 	EnableAll() (int, error)                                              // annule le gel : rouvre tous les comptes
 	AllAccounts() []*Account                                              // espace admin : liste tous les comptes
 	DeleteByPID(pid uint64) error                                         // espace admin : supprime un compte
+	SoftDeleteByPID(pid uint64, reason string) (*DeletedRecord, string, error) // suppression compte : cascade + trace
+	AllDeleted() []*DeletedRecord                                         // espace admin : trace des comptes supprimés
 	SendFriendRequest(id int64, targetPID uint64) (*Account, bool, error) // (target, alreadyFriends, err)
 	AcceptFriendRequest(id int64, fromPID uint64) (*Account, error)
 	DeclineFriendRequest(id int64, fromPID uint64) error
 	RemoveFriend(id int64, friendPID uint64) error
+	SetFavorite(id int64, friendPID uint64, fav bool) error
 	BlockUser(id int64, targetPID uint64) error
 	UnblockUser(id int64, targetPID uint64) error
+	AddModFavorite(id int64, fav ModFavorite) error          // magasin de mods : favori GameBanana synchronisé au compte
+	RemoveModFavorite(id int64, modID int64) error           //   idem : retire un favori
+	ListModFavorites(id int64, gameID int64) ([]ModFavorite, error) // idem : liste (gameID 0 = tous les jeux)
 }
 
 // jsonStore is a concurrency-safe, file-backed store for local testing.
@@ -229,11 +219,12 @@ type jsonStore struct {
 	path   string
 	NextID int64              `json:"next_id"`
 	NextP  uint64             `json:"next_pid"`
-	Accts  map[int64]*Account `json:"accounts"`
-	byUser map[string]int64   `json:"-"`
-	byMail map[string]int64   `json:"-"`
-	byPID  map[uint64]int64   `json:"-"`
-	byCode map[string]int64   `json:"-"`
+	Accts   map[int64]*Account `json:"accounts"`
+	Deleted []*DeletedRecord   `json:"deleted,omitempty"` // trace des comptes supprimés (espace admin)
+	byUser  map[string]int64   `json:"-"`
+	byMail  map[string]int64   `json:"-"`
+	byPID   map[uint64]int64   `json:"-"`
+	byCode  map[string]int64   `json:"-"`
 }
 
 func newJSONStore(path string) (*jsonStore, error) {
@@ -488,6 +479,34 @@ func hasFriendPID(a *Account, pid uint64) bool {
 	return false
 }
 
+func addFavoritePID(a *Account, pid uint64) {
+	for _, p := range a.Favorites {
+		if p == pid {
+			return
+		}
+	}
+	a.Favorites = append(a.Favorites, pid)
+}
+
+func removeFavoritePID(a *Account, pid uint64) {
+	out := a.Favorites[:0]
+	for _, p := range a.Favorites {
+		if p != pid {
+			out = append(out, p)
+		}
+	}
+	a.Favorites = out
+}
+
+func hasFavoritePID(a *Account, pid uint64) bool {
+	for _, p := range a.Favorites {
+		if p == pid {
+			return true
+		}
+	}
+	return false
+}
+
 func addReqPID(a *Account, pid uint64) {
 	for _, p := range a.FriendRequests {
 		if p == pid {
@@ -637,6 +656,21 @@ func (s *jsonStore) DeclineFriendRequest(id int64, fromPID uint64) error {
 	return s.persist()
 }
 
+func (s *jsonStore) SetFavorite(id int64, friendPID uint64, fav bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.Accts[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if fav {
+		addFavoritePID(a, friendPID)
+	} else {
+		removeFavoritePID(a, friendPID)
+	}
+	return s.persist()
+}
+
 func (s *jsonStore) RemoveFriend(id int64, friendPID uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -760,6 +794,32 @@ func loadSecret() {
 	_ = os.WriteFile(path, []byte(hex.EncodeToString(sessionSecret)), 0o600)
 }
 
+// setTokenCookie stores the web session token as an HttpOnly, Secure, SameSite=Strict
+// cookie (XSS-safe) instead of localStorage. [Q-MED-4]
+func setTokenCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "nx_token",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   30 * 24 * 3600, // 30 jours, aligné sur l'expiry de signToken
+	})
+}
+
+// tokenFromRequest reads the web session token from the Authorization header first,
+// then falls back to the nx_token cookie (the secure HttpOnly storage). [Q-MED-4]
+func tokenFromRequest(r *http.Request) string {
+	if tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); tok != "" {
+		return tok
+	}
+	if c, err := r.Cookie("nx_token"); err == nil && c.Value != "" {
+		return c.Value
+	}
+	return ""
+}
+
 // signToken issues a web session token carrying a session id so the session can be
 // listed/revoked: base64(accountID.sessionID.expiry).hmac.
 func signToken(accountID int64, sessionID string) string {
@@ -771,12 +831,24 @@ func signToken(accountID int64, sessionID string) string {
 }
 
 // signNexToken issues the token the EMULATOR presents to the NEX auth server
-// (the game's NEX auth server) in LoginEx. It encodes the account's persistent NEX PID +
+// (mk8-auth-local) in LoginEx. It encodes the account's persistent NEX PID +
 // username, signed with the SHARED secret (NEXTENDO_SECRET) so the auth server
 // can validate it offline and trust the PID — no DB call needed. Format:
 //
 //	nx2.<base64url(pid.username.expiry)>.<base64url(hmac)>
 //
+// revokedNexPayloads lists leaked nex_token payloads ("pid.username.expiry") that MUST be
+// rejected even though their HMAC signature is valid. 2026-07-22 incident: the 1.6.5 Windows
+// release was accidentally packaged from a folder where the maintainer had test-logged-in, so
+// portable/nextendo_account.txt (a live session) shipped to every downloader — leaking this
+// exact token to the whole community. Denylisting the payload kills the leaked credential
+// everywhere it is presented, without rotating the shared secret (which would log out everyone
+// and change every account's derived BAAS/NA IDs). The maintainer simply re-logs in for a fresh
+// token. Keep this in sync with the identical list in each NEXtendo game server.
+var revokedNexPayloads = map[string]bool{
+	"1800000006.Kazuu.1787343209": true, // fuite release 1.6.5-win (Kazuu / PID 1800000006)
+}
+
 // The "nx2." prefix lets the auth server recognise a Nextendo token vs the
 // legacy stub username.
 func signNexToken(pid uint64, username string) string {
@@ -806,6 +878,9 @@ func verifyNexToken(tok string) (uint64, bool) {
 	mac.Write([]byte("nex:" + string(raw)))
 	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	if !hmac.Equal([]byte(want), []byte(parts[1])) {
+		return 0, false
+	}
+	if revokedNexPayloads[string(raw)] { // jeton fuité (cf. revokedNexPayloads) — refusé malgré une signature valide
 		return 0, false
 	}
 	fields := strings.SplitN(string(raw), ".", 3) // pid.username.expiry
@@ -895,6 +970,9 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "POST attendu")
 		return
 	}
+	if !turnstileGuard(w, r) { // verrou anti-relais : refuse un formulaire servi depuis un autre domaine
+		return
+	}
 	if !registrationOpen() {
 		writeErr(w, http.StatusForbidden, "Les inscriptions sont temporairement fermées, le temps de finaliser la nouvelle version de Nextendo. Reviens bientôt !")
 		return
@@ -935,10 +1013,10 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 	sendVerificationEmail(acct) // e-mail de confirmation (ou lien loggé en mode dev)
 	sess := newSession(acct.PID, "browser", clientIP(r), r.UserAgent())
 	log.Printf("[register] %s pid=%d code=%s", acct.Username, acct.PID, acct.FriendCode)
-	token := signToken(acct.ID, sess.ID)
-	setTokenCookie(w, token)
+	webTok := signToken(acct.ID, sess.ID)
+	setTokenCookie(w, webTok)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":     token,
+		"token":     webTok,
 		"nex_token": signNexToken(acct.PID, acct.Username),
 		"account":   acct.Public(),
 	})
@@ -950,6 +1028,9 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "POST attendu")
+		return
+	}
+	if !turnstileGuard(w, r) { // verrou anti-relais : refuse un formulaire servi depuis un autre domaine
 		return
 	}
 	var in struct{ Login, Password string }
@@ -975,10 +1056,10 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := newSession(acct.PID, "browser", clientIP(r), r.UserAgent())
 	log.Printf("[login] %s pid=%d", acct.Username, acct.PID)
-	token := signToken(acct.ID, sess.ID)
-	setTokenCookie(w, token)
+	webTok := signToken(acct.ID, sess.ID)
+	setTokenCookie(w, webTok)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":     token,
+		"token":     webTok,
 		"nex_token": signNexToken(acct.PID, acct.Username),
 		"account":   acct.Public(),
 	})
@@ -1104,7 +1185,8 @@ func (s *server) resetPassword(w http.ResponseWriter, r *http.Request) {
 // sessions lists the account's active sessions (navigateur / Ryujinx / Switch) with IP +
 // géo, en marquant celle qui fait la requête comme "current".
 func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
-	id, sid, ok := verifyTokenFull(tokenFromRequest(r))
+	tok := tokenFromRequest(r)
+	id, sid, ok := verifyTokenFull(tok)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
 		return
@@ -1124,7 +1206,8 @@ func (s *server) sessions(w http.ResponseWriter, r *http.Request) {
 
 // revokeSessionHandler révoque UNE session par id (doit appartenir au compte appelant).
 func (s *server) revokeSessionHandler(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := verifyTokenFull(tokenFromRequest(r))
+	tok := tokenFromRequest(r)
+	id, _, ok := verifyTokenFull(tok)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
 		return
@@ -1153,7 +1236,8 @@ func (s *server) revokeSessionHandler(w http.ResponseWriter, r *http.Request) {
 
 // revokeAllSessions ferme TOUTES les sessions du compte — y compris le navigateur courant.
 func (s *server) revokeAllSessions(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := verifyTokenFull(tokenFromRequest(r))
+	tok := tokenFromRequest(r)
+	id, _, ok := verifyTokenFull(tok)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
 		return
@@ -1247,7 +1331,9 @@ func (s *server) evalOnlineGates(pid uint64) (string, bool) {
 	// Gate Discord : online réservé aux comptes liés au Discord (donc membres du serveur, le bot
 	// ne lie qu'un membre). Le lien est poussé ici par le bot (voir discord.go). Piloté par
 	// NEXTENDO_REQUIRE_DISCORD=1 pour pouvoir l'activer une fois le backfill des liens confirmé.
-	if discordLinkRequired() && acct.DiscordID == "" && !acct.IsGuest() {
+	// « Lié » = DiscordID OU DiscordUsername présent (le username est la 2ᵉ preuve du lien, et
+	// résiste même si l'id venait à manquer). Un guest n'est jamais gaté ici.
+	if discordLinkRequired() && acct.DiscordID == "" && acct.DiscordUsername == "" && !acct.IsGuest() {
 		return "discord_unlinked", false
 	}
 	// #5 un seul endroit à la fois — basé sur la PRÉSENCE RÉELLE (le PID est-il connecté à un
@@ -1284,26 +1370,6 @@ func (s *server) evalOnlineGatesWithSelf(pid uint64, kind, ip string) (string, b
 	return reason, allow
 }
 
-// gateMessage maps an evalOnlineGates reason to a user-facing message (French,
-// matching the site/emulator locale). The emulator shows this in its UI instead
-// of letting the Switch display a cryptic error code like 2124-3121.
-func gateMessage(reason string) string {
-	switch reason {
-	case "unknown":
-		return "Ce compte Nextendo n'existe pas. Vérifie ton identifiant de connexion."
-	case "disabled":
-		return "Ce compte est désactivé. Contacte l'équipe Nextendo pour plus d'informations."
-	case "unverified":
-		return "Ton adresse e-mail n'a pas encore été confirmée. Vérifie ta boîte de réception (y compris les spams) et clique sur le lien de confirmation. Tu peux aussi demander un nouveau lien depuis la page Connexion du site Nextendo."
-	case "discord_unlinked":
-		return "Ton compte Nextendo doit être lié au serveur Discord pour jouer en ligne. Rejoins le Discord Nextendo et lie ton compte depuis ton profil."
-	case "elsewhere":
-		return "Tu joues déjà sur un autre appareil (Switch ou Ryujinx). Ferme la session en cours pour pouvoir te connecter ici."
-	default:
-		return ""
-	}
-}
-
 func (s *server) onlineStatus(w http.ResponseWriter, r *http.Request) {
 	acct, ok := s.accountFromBearer(r)
 	if !ok {
@@ -1316,7 +1382,7 @@ func (s *server) onlineStatus(w http.ResponseWriter, r *http.Request) {
 		kind = se.Kind
 	}
 	reason, allow := s.evalOnlineGatesWithSelf(acct.PID, kind, clientIP(r))
-	writeJSON(w, http.StatusOK, map[string]any{"allow": allow, "reason": reason, "message": gateMessage(reason)})
+	writeJSON(w, http.StatusOK, map[string]any{"allow": allow, "reason": reason})
 }
 
 func (s *server) onlineCheck(w http.ResponseWriter, r *http.Request) {
@@ -1388,7 +1454,8 @@ func (s *server) nexSession(w http.ResponseWriter, r *http.Request) {
 // emulator's account/auth layer; the NEX auth server validates it and uses the
 // account's persistent PID.
 func (s *server) nexToken(w http.ResponseWriter, r *http.Request) {
-	id, ok := verifyToken(tokenFromRequest(r))
+	tok := tokenFromRequest(r)
+	id, ok := verifyToken(tok)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
 		return
@@ -1463,8 +1530,10 @@ func (s *server) guest(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := newSession(acct.PID, "browser", ip, r.UserAgent())
 	log.Printf("[guest] %s pid=%d code=%s ip=%s", acct.Username, acct.PID, acct.FriendCode, ip)
+	webTok := signToken(acct.ID, sess.ID)
+	setTokenCookie(w, webTok)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":     signToken(acct.ID, sess.ID),
+		"token":     webTok,
 		"nex_token": signNexToken(acct.PID, acct.Username),
 		"account":   acct.Public(),
 		"guest":     true,
@@ -1575,7 +1644,8 @@ func (s *server) betaConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) me(w http.ResponseWriter, r *http.Request) {
-	id, ok := verifyToken(tokenFromRequest(r))
+	tok := tokenFromRequest(r)
+	id, ok := verifyToken(tok)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
 		return
@@ -1591,7 +1661,7 @@ func (s *server) me(w http.ResponseWriter, r *http.Request) {
 // profile GETs or PUTs the account's synced in-game identity (nickname / avatar
 // / Mii). The emulator pulls it on Nextendo login and pushes it back when the
 // local identity changes — so the player's profile + Mii follow the account
-// across machines (the "account is authoritative" model).
+// across machines (the Pretendo "account is authoritative" model).
 func (s *server) profile(w http.ResponseWriter, r *http.Request) {
 	acct, ok := s.accountFromBearer(r) // session token OR nex token
 	if !ok {
@@ -1759,7 +1829,9 @@ func (s *server) friends(w http.ResponseWriter, r *http.Request) {
 		friends := make([]map[string]any, 0, len(acct.Friends))
 		for _, pid := range acct.Friends {
 			if f, err := s.store.ByPID(pid); err == nil {
-				friends = append(friends, friendView(f))
+				fv := friendView(f)
+				fv["favorite"] = hasFavoritePID(acct, pid)
+				friends = append(friends, fv)
 			} else if rec, ok := banRecordForPID(pid); ok {
 				name := rec.Username
 				if name == "" {
@@ -1768,6 +1840,7 @@ func (s *server) friends(w http.ResponseWriter, r *http.Request) {
 				friends = append(friends, map[string]any{
 					"pid": pid, "username": name, "name": name,
 					"friend_code": rec.FriendCode, "banned": true,
+					"favorite": hasFavoritePID(acct, pid),
 					"presence": map[string]any{"status": 0},
 				})
 			}
@@ -1806,6 +1879,37 @@ func (s *server) friends(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "GET ou POST attendu")
 	}
+}
+
+// friendFavorite: POST {pid, favorite} marque/démarque un ami comme favori (étoile).
+// Le favori vit sur le compte → synchronisé entre l'émulateur et le site (même API).
+func (s *server) friendFavorite(w http.ResponseWriter, r *http.Request) {
+	acct, ok := s.accountFromBearer(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "Session invalide ou expirée.")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "POST attendu")
+		return
+	}
+	var in struct {
+		PID      uint64 `json:"pid"`
+		Favorite bool   `json:"favorite"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "JSON invalide")
+		return
+	}
+	if !hasFriendPID(acct, in.PID) {
+		writeErr(w, http.StatusBadRequest, "Ce joueur n'est pas dans tes amis.")
+		return
+	}
+	if err := s.store.SetFavorite(acct.ID, in.PID, in.Favorite); err != nil {
+		writeErr(w, http.StatusInternalServerError, "Impossible de mettre à jour le favori.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pid": in.PID, "favorite": in.Favorite})
 }
 
 // friendAccept: POST {pid} accepts an incoming friend request (becomes mutual).
@@ -2221,12 +2325,27 @@ func (s *server) save(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// [Nextendo beta] Cloud saves are a full-account feature — GUEST profiles don't get it.
-	if acct.IsGuest() {
-		writeErr(w, http.StatusForbidden, "Les sauvegardes dans le cloud ne sont pas disponibles pour les profils invités.")
+	// [Nextendo] Les sauvegardes cloud sont réservées aux comptes complets avec e-mail VÉRIFIÉ et
+	// Discord LIÉ (upload comme download). La gate couvre toutes les opérations save (info/parsed/
+	// delete/GET/HEAD/PUT) : la console ne peut ni pousser ni récupérer sans y être éligible.
+	if reason, ok := cloudSaveGate(acct); !ok {
+		writeErr(w, http.StatusForbidden, reason)
 		return
 	}
 	pid := acct.PID
+
+	if strings.HasSuffix(strings.ToLower(r.URL.Path), "/info") {
+		s.saveInfo(w, r)
+		return
+	}
+	if strings.HasSuffix(strings.ToLower(r.URL.Path), "/parsed") {
+		s.saveParsed(w, r)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		s.saveDelete(w, r)
+		return
+	}
 
 	titleID := strings.ToLower(strings.TrimPrefix(r.URL.Path, "/api/save/"))
 	if !reTitleID.MatchString(titleID) {
@@ -2246,11 +2365,58 @@ func (s *server) save(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write(b)
+	case http.MethodHead:
+		fi, err := os.Stat(path)
+		if err != nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
+		w.WriteHeader(http.StatusOK)
 	case http.MethodPut, http.MethodPost:
-		r.Body = http.MaxBytesReader(w, r.Body, 64<<20) // 64 MiB cap
+		// Cap the in-memory body just above the largest legitimate quota (10 MiB booster) so a
+		// flood of oversized uploads can't exhaust RAM. Anything bigger is refused before the
+		// quota logic even runs.
+		r.Body = http.MaxBytesReader(w, r.Body, cloudSaveLimitBooster+2<<20) // 12 MiB hard cap
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, "lecture échouée ou save trop volumineuse")
+			writeErr(w, http.StatusRequestEntityTooLarge, "Sauvegarde trop volumineuse.")
+			return
+		}
+
+		if !cloudSaveTitles[titleID] && !acct.IsBooster {
+			writeErr(w, http.StatusForbidden, "Les sauvegardes cloud sont limitées à Mario Kart 8 Deluxe, Splatoon 2, Super Smash Bros. Ultimate et Animal Crossing: New Horizons.")
+			return
+		}
+
+		// Sérialise la lecture-du-total + l'écriture PAR COMPTE : sinon des uploads concurrents pour
+		// des titres différents contournent le quota (chacun lit le total avant que les autres
+		// écrivent). Verrou par PID → les autres comptes ne sont pas bloqués.
+		releaseSave := lockSavePID(pid)
+		defer releaseSave()
+
+		var totalSize int64
+		if entries, rerr := os.ReadDir(dir); rerr == nil {
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".bin") {
+					continue
+				}
+				if info, ierr := e.Info(); ierr == nil {
+					if e.Name() != titleID+".bin" {
+						totalSize += info.Size()
+					}
+				}
+			}
+		}
+		totalSize += int64(len(b))
+
+		limit := cloudSaveLimitFor(acct)
+		if totalSize > limit {
+			if acct.IsBooster {
+				writeErr(w, http.StatusRequestEntityTooLarge, "Limite de stockage cloud atteinte (10 Mo). Supprime des sauvegardes.")
+			} else {
+				writeErr(w, http.StatusRequestEntityTooLarge, "Limite de stockage cloud atteinte (5 Mo). Supprime des sauvegardes ou deviens booster Discord (10 Mo).")
+			}
 			return
 		}
 		// ★ Anti-clobber guard (fixes the recurring save-loss): never let a near-empty /
@@ -2708,6 +2874,21 @@ func main() {
 	loadEnvFile()
 	loadSecret()
 
+	// CA de secours pour les appels HTTPS sortants (siteverify Turnstile). Le conteneur
+	// Debian-slim n'embarque pas le paquet ca-certificates → « certificate signed by
+	// unknown authority », ce qui mettait toute la vérif Turnstile en fail-open aveugle.
+	// Si un bundle est présent sur le volume de données (déposé une fois, il survit à une
+	// recréation du conteneur), on le désigne explicitement. DOIT précéder tout handshake
+	// TLS (Go lit SSL_CERT_FILE au premier chargement du pool de racines). No-op si
+	// SSL_CERT_FILE est déjà défini ou le fichier absent.
+	if os.Getenv("SSL_CERT_FILE") == "" {
+		caPath := oauthDataDir() + "/ca-certificates.crt"
+		if _, err := os.Stat(caPath); err == nil {
+			os.Setenv("SSL_CERT_FILE", caPath)
+			log.Printf("[tls] CA de secours activé: SSL_CERT_FILE=%s", caPath)
+		}
+	}
+
 	if v := os.Getenv("NEXTENDO_SAVES"); v != "" {
 		saveDir = v
 	}
@@ -2760,6 +2941,8 @@ func main() {
 
 	applyLaunchFreeze(store) // gel de relance piloté par env (NEXTENDO_LOCKDOWN_KEEP_PID / NEXTENDO_ENABLE_ALL)
 
+	go srv.cloudGraceLoop() // downgrade booster : nettoyage auto des saves passé le délai de 3 j
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/register", srv.register)
 	mux.HandleFunc("/api/login", srv.login)
@@ -2768,6 +2951,9 @@ func main() {
 	mux.HandleFunc("/api/forgot", srv.forgot)                                                         // envoie un lien de réinitialisation
 	mux.HandleFunc("/api/reset", srv.resetPassword)                                                   // pose un nouveau mot de passe via le lien
 	mux.HandleFunc("/api/email", srv.changeEmail)                                                     // changer l'adresse e-mail (re-vérif)
+	mux.HandleFunc("/api/delete-account", srv.deleteAccount)                                          // supprimer SON compte (cascade + trace admin)
+	mux.HandleFunc("/api/mod-favorites", srv.modFavorites)                                            // magasin de mods : favoris GameBanana (GET liste / POST ajoute)
+	mux.HandleFunc("/api/mod-favorites/remove", srv.modFavoriteRemove)                                //   idem : retire un favori
 	mux.HandleFunc("/api/sessions", srv.sessions)                                                     // liste des sessions actives
 	mux.HandleFunc("/api/sessions/revoke", srv.revokeSessionHandler)                                  // déconnecter UNE session
 	mux.HandleFunc("/api/sessions/revoke-all", srv.revokeAllSessions)                                 // fermer TOUTES les sessions
@@ -2783,9 +2969,15 @@ func main() {
 	mux.HandleFunc("/api/admin/users", srv.adminUsers)                                                // admin : liste des utilisateurs + activité
 	mux.HandleFunc("/api/admin/stats", srv.adminStats)                                                // admin : stats globales
 	mux.HandleFunc("/api/admin/delete-user", srv.adminDeleteUser)                                     // admin : supprimer un compte
+	mux.HandleFunc("/api/admin/deleted", srv.adminDeleted)                                            // admin : trace des comptes supprimés
 	mux.HandleFunc("/api/admin/ban", srv.adminBan)                                                    // admin/bot : bannir (delete + blocklist + wipe cloud)
 	mux.HandleFunc("/api/admin/unban", srv.adminUnban)                                                // admin : lever un ban (libère e-mail/IP/code + débannit du Discord)
 	mux.HandleFunc("/api/admin/discord-link", srv.adminDiscordLink)                                   // bot : pousse le lien Discord↔Nextendo (source de vérité du gate)
+	// OAuth « Sign in with Nextendo » — intégration tierce sans jamais exposer le mot de passe (voir oauth.go)
+	mux.HandleFunc("/api/oauth/authorize", srv.oauthAuthorize)             // page de consentement + émission du code
+	mux.HandleFunc("/api/oauth/token", srv.oauthToken)                     // échange code → access token (serveur-à-serveur)
+	mux.HandleFunc("/api/oauth/userinfo", srv.oauthUserinfo)               // données scopées (Bearer access token)
+	mux.HandleFunc("/api/oauth/register-client", srv.oauthRegisterClient)  // admin : enregistrer une application tierce
 	mux.HandleFunc("/api/guest", srv.guest)
 	mux.HandleFunc("/api/username-available", srv.usernameAvailable)
 	mux.HandleFunc("/api/names", srv.names)
@@ -2801,7 +2993,9 @@ func main() {
 	mux.HandleFunc("/api/friends/decline", srv.friendDecline)
 	mux.HandleFunc("/api/friends/remove", srv.friendRemove)
 	mux.HandleFunc("/api/friends/block", srv.friendBlock)
+	mux.HandleFunc("/api/friends/favorite", srv.friendFavorite) // ⭐ favori ami (synchro émulateur + site)
 	mux.HandleFunc("/api/friends/history", srv.friendHistory)
+	mux.HandleFunc("/api/saves", srv.saveList)
 	mux.HandleFunc("/api/save/", srv.save)
 	mux.HandleFunc("/api/cache/", srv.cache)
 	mux.HandleFunc("/api/bcat/", srv.bcat)
@@ -2817,6 +3011,7 @@ func main() {
 	mux.HandleFunc("/internal/friend-accept", internalOnly("/internal/friend-accept", srv.internalFriendAccept))    // nx-account relays Switch friend accept/decline
 	mux.HandleFunc("/internal/resolve", internalOnly("/internal/resolve", srv.internalResolve))                     // nx-account resolves a friend code / BAAS id -> account (add-by-code)
 	mux.HandleFunc("/internal/friend-request", internalOnly("/internal/friend-request", srv.internalFriendRequest)) // nx-account records a friend request sent from the console
+	mux.HandleFunc("/internal/npln-friends", internalOnly("/internal/npln-friends", srv.internalNplnFriends))       // npln-s3 (S3/NPLN) reads the unified Nextendo friend graph
 	mux.HandleFunc("/internal/identity", internalOnly("/internal/identity", srv.internalIdentity))                  // nx-account pulls the Nextendo identity for a real CFW Switch
 	mux.HandleFunc("/internal/pid-by-bsdid", internalOnly("/internal/pid-by-bsdid", srv.internalPIDByBsDid))        // nx-account résout le bs:did d'une requête -> compte (identité par requête)
 	mux.HandleFunc("/internal/login", internalOnly("/internal/login", srv.internalLogin))                           // nx-account's account-link page validates Nextendo credentials here

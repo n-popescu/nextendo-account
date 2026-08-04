@@ -60,6 +60,9 @@ var (
 	rlForgot = newRateLimiter(3, time.Hour)
 	// 5 créations de compte par IP et par heure.
 	rlRegister = newRateLimiter(5, time.Hour)
+	// 5 suppressions de compte par IP et par 15 min : le mot de passe est reconfirmé (bcrypt), donc
+	// on borne un éventuel brute-force via une session volée + on évite la charge CPU.
+	rlDelete = newRateLimiter(5, 15*time.Minute)
 )
 
 // rateGuard applique la limite et répond 429 le cas échéant. true = la requête peut continuer.

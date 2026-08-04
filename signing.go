@@ -1,6 +1,6 @@
 package main
 
-// [Artifact-integrity] Intégrité VÉRIFIABLE des artefacts servis au homebrew.
+// [Audit Prelude #1/#2/#6] Intégrité VÉRIFIABLE des artefacts servis au homebrew.
 //
 // Le canal de MAJ ne validait que la TAILLE de ce qu'il téléchargeait. Sur du HTTP en clair,
 // un homme du milieu substitue n'importe quel binaire de même taille sans être détecté — c'est

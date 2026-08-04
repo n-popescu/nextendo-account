@@ -45,7 +45,7 @@ func (s *jsonStore) SetDisabled(id int64, disabled bool) error {
 
 // LockdownExcept ferme TOUS les comptes sauf keepPID. Le compte conservé est aussi
 // force-vérifié + réactivé (sinon le gate e-mail #6 verrouillerait l'opérateur, car son
-// adresse sur le domaine du serveur lui-même ne peut pas recevoir le mail de vérification). Idempotent.
+// adresse @nextendo.net ne peut pas recevoir le mail de vérification). Idempotent.
 // Retourne le nombre de comptes nouvellement désactivés.
 func (s *jsonStore) LockdownExcept(keepPID uint64) (int, error) {
 	s.mu.Lock()

@@ -2,7 +2,7 @@ package main
 
 import "testing"
 
-// [Audit path-traversal] Le serveur ne doit JAMAIS émettre un chemin capable de sortir de l'arbre
+// [Audit Prelude #3] Le serveur ne doit JAMAIS émettre un chemin capable de sortir de l'arbre
 // de sauvegarde : le homebrew le concatène aveuglément. Ce test fige ce qui est refusé.
 func TestSafeBcatPath(t *testing.T) {
 	ok := []string{
