@@ -2954,6 +2954,7 @@ func main() {
 	mux.HandleFunc("/api/delete-account", srv.deleteAccount)                                          // supprimer SON compte (cascade + trace admin)
 	mux.HandleFunc("/api/mod-favorites", srv.modFavorites)                                            // magasin de mods : favoris GameBanana (GET liste / POST ajoute)
 	mux.HandleFunc("/api/mod-favorites/remove", srv.modFavoriteRemove)                                //   idem : retire un favori
+	mux.HandleFunc("/api/splatoon2/rotation", srv.splatRotation)                                      // rotation de maps fictive (site communautaire) — CORS *, clé optionnelle
 	mux.HandleFunc("/api/sessions", srv.sessions)                                                     // liste des sessions actives
 	mux.HandleFunc("/api/sessions/revoke", srv.revokeSessionHandler)                                  // déconnecter UNE session
 	mux.HandleFunc("/api/sessions/revoke-all", srv.revokeAllSessions)                                 // fermer TOUTES les sessions
