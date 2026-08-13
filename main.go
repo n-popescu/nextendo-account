@@ -52,7 +52,11 @@ type Account struct {
 	CreatedAt     time.Time `json:"created_at"`
 	EmailVerified bool      `json:"email_verified"`     // true once the user clicked the e-mailed verification link
 	Disabled      bool      `json:"disabled,omitempty"` // gel de relance : true = compte fermé (connexion site bloquée + refusé en ligne). Réversible.
-	RegIP         string    `json:"reg_ip,omitempty"`   // IP d'inscription — réservée si le compte est banni
+	RegIP         string    `json:"reg_ip,omitempty"`
+	// Country picked by the player (ISO 3166-1 alpha-2). Drives the flag shown
+	// in game: the emulator only knows a REGION, never a country, so the account
+	// is the source of truth. Empty = unknown (accounts created before this).
+	Country       string    `json:"country,omitempty"`   // IP d'inscription — réservée si le compte est banni
 
 	// Lien Discord poussé par le bot de vérif (voir discord.go). Le compte est la source de
 	// vérité : le gate online peut l'exiger, et un ban depuis le site sait qui bannir sur Discord.
@@ -116,6 +120,8 @@ func (a *Account) Public() map[string]any {
 		// Booster du serveur Discord (poussé par le bot) : débloque le cloud-save tous-jeux et le
 		// badge « MEMBRE BOOSTER » rose sur l'espace perso.
 		"isBooster": a.IsBooster,
+		// Player country (ISO alpha-2); empty until they pick one.
+		"country": a.Country,
 	}
 }
 
@@ -184,6 +190,7 @@ type Store interface {
 	ByFriendCode(code string) (*Account, error)
 	SetProfile(id int64, p *Profile) (*Account, error)
 	SetUsername(id int64, username string) (*Account, error)
+	SetCountry(id int64, code string) (*Account, error)
 	SetPassword(id int64, passwordHash string) error
 	SetEmailVerified(id int64, verified bool) error
 	SetEmail(id int64, email string) (*Account, error)
@@ -977,7 +984,7 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "Les inscriptions sont temporairement fermées, le temps de finaliser la nouvelle version de Nextendo. Reviens bientôt !")
 		return
 	}
-	var in struct{ Username, Email, Password string }
+	var in struct{ Username, Email, Password, Country string }
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "JSON invalide")
 		return
@@ -2945,6 +2952,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/register", srv.register)
+	mux.HandleFunc("/api/country", srv.country)
 	mux.HandleFunc("/api/login", srv.login)
 	mux.HandleFunc("/api/verify", srv.verifyEmail)                                                    // confirme l'e-mail (lien reçu par mail)
 	mux.HandleFunc("/api/resend-verification", srv.resendVerification)                                // renvoie l'e-mail de confirmation
