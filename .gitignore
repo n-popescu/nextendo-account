@@ -13,3 +13,6 @@ internal_key.txt
 accounts.json
 sessions.json
 bans.json
+
+# build output
+/nextendo-account
