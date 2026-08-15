@@ -38,6 +38,21 @@ secrets, keys, credentials, or personal data are baked into the source**: the to
 internal key, SMTP credentials, and admin list are all read from the environment (or files) at
 startup, and the admin space is closed until you configure `NEXTENDO_ADMIN_EMAILS`.
 
+## This fork: the Switch friends fix
+
+This is a fork of [`NextendoNetwork/nextendo-account`](https://github.com/NextendoNetwork/nextendo-account)
+carrying the server-side half of the fix for two reported Switch problems: friends never appearing
+online, and every console adding friends as one single account (the project owner's friend code showing
+up everywhere).
+
+It adds console **identity bindings** (`/internal/whoami`, `/internal/bind`, `/internal/unbind`) so
+"who is calling?" is resolved per request from the ids the console actually presents — and **fails
+closed** instead of falling back to a default account — plus a console **presence** writer
+(`/internal/presence`) and presence liveness derived from console traffic.
+
+**Read [FRIENDS-FIX.md](FRIENDS-FIX.md)** for the full analysis, the API, and the small change the
+(non-public) `nx-account` component still needs.
+
 ## Internal routes
 
 `/api/*` routes are public; `/internal/*` routes (identity, login, presence) are a control plane that
