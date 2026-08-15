@@ -1,0 +1,68 @@
+diff --git a/main.go b/main.go
+index 1277141..09558c0 100644
+--- a/main.go
++++ b/main.go
+@@ -2748,6 +2748,11 @@ func (s *server) internalIdentity(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 	acct.ensureNintendoIDs() // deterministic; fills in-memory for pre-existing accounts
++	// Cette requête est faite PAR la console (nx-account l'appelle pour la servir) :
++	// c'est donc la preuve que la console est allumée et connectée. On s'en sert comme
++	// source de présence — sans quoi un ami n'apparaît « en ligne » que s'il est dans un
++	// jeu NEX, ce qui explique les amis éternellement hors ligne. Voir console_presence.go.
++	noteConsoleOnline(acct.PID)
+ 	nickname := displayName(acct)
+ 	// pseudo affiché = Profile.Name (pseudo synchronisé depuis la console) sinon Username.
+ 	// avatar = image uploadée OU icône de galerie choisie (résolue depuis avatarsDir).
+@@ -2789,13 +2794,18 @@ func (s *server) internalPIDByBsDid(w http.ResponseWriter, r *http.Request) {
+ 		writeErr(w, http.StatusBadRequest, "bsdid manquant")
+ 		return
+ 	}
+-	for _, a := range s.store.AllAccounts() {
+-		a.ensureNintendoIDs() // déterministe : remplit BsDid pour les comptes anciens
+-		if strings.ToLower(a.BsDid) == want {
+-			writeJSON(w, http.StatusOK, map[string]any{"pid": a.PID})
+-			return
+-		}
++	// Résolution par l'index des liaisons (O(1)) puis par les ids DÉRIVÉS : une
++	// console qui possédait déjà un compte d'appareil présente SON id, jamais le
++	// nôtre, et c'est ce cas qui faisait échouer la résolution — donc retomber sur
++	// le compte par défaut de nx-account. /internal/whoami est l'entrée à préférer
++	// (elle accepte aussi le « sub ») ; celle-ci reste pour la compatibilité.
++	if acct, via, err := s.resolveConsole("", want); err == nil && acct != nil {
++		noteConsoleOnline(acct.PID)
++		log.Printf("[pid-by-bsdid] %s -> pid=%d via %s", want, acct.PID, via)
++		writeJSON(w, http.StatusOK, map[string]any{"pid": acct.PID, "via": via})
++		return
+ 	}
++	log.Printf("[pid-by-bsdid] %s -> AUCUN COMPTE (le client doit être refusé, jamais rattaché à un compte par défaut)", want)
+ 	writeErr(w, http.StatusNotFound, "bs:did inconnu")
+ }
+ 
+@@ -2821,6 +2831,11 @@ func (s *server) internalLogin(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 	acct.ensureNintendoIDs()
++	// La page de liaison vient d'authentifier ce compte SUR la console : elle est
++	// donc en ligne. (nx-account doit en profiter pour appeler /internal/bind avec
++	// les ids que la console présente réellement — c'est ce qui rend une console
++	// déjà provisionnée utilisable sans réinitialisation.)
++	noteConsoleOnline(acct.PID)
+ 	nickname := displayName(acct)
+ 	// pseudo affiché = Profile.Name (synchronisé depuis la console) sinon Username.
+ 	// avatar = image uploadée OU icône de galerie choisie (résolue depuis avatarsDir).
+@@ -3021,6 +3036,14 @@ func main() {
+ 	mux.HandleFunc("/internal/resolve", internalOnly("/internal/resolve", srv.internalResolve))                     // nx-account resolves a friend code / BAAS id -> account (add-by-code)
+ 	mux.HandleFunc("/internal/friend-request", internalOnly("/internal/friend-request", srv.internalFriendRequest)) // nx-account records a friend request sent from the console
+ 	mux.HandleFunc("/internal/npln-friends", internalOnly("/internal/npln-friends", srv.internalNplnFriends))       // npln-s3 (S3/NPLN) reads the unified Nextendo friend graph
++	// Liaisons d'identité console (voir nintendo_bindings.go) : la résolution
++	// « qui appelle ? » par REQUÊTE, sans aucun repli sur un compte par défaut.
++	mux.HandleFunc("/internal/whoami", internalOnly("/internal/whoami", srv.internalWhoami)) // console (sub + bs:did) -> compte, 404 sinon
++	mux.HandleFunc("/internal/bind", internalOnly("/internal/bind", srv.internalBind))       // enregistre l'identité RÉELLE d'une console
++	mux.HandleFunc("/internal/unbind", internalOnly("/internal/unbind", srv.internalUnbind)) // retire une liaison (déplacer une console)
++	// Présence poussée par la console (voir console_presence.go) : la moitié
++	// manquante de la présence — sans elle un ami n'apparaît jamais en ligne.
++	mux.HandleFunc("/internal/presence", internalOnly("/internal/presence", srv.internalPresence))
+ 	mux.HandleFunc("/internal/identity", internalOnly("/internal/identity", srv.internalIdentity))                  // nx-account pulls the Nextendo identity for a real CFW Switch
+ 	mux.HandleFunc("/internal/pid-by-bsdid", internalOnly("/internal/pid-by-bsdid", srv.internalPIDByBsDid))        // nx-account résout le bs:did d'une requête -> compte (identité par requête)
+ 	mux.HandleFunc("/internal/login", internalOnly("/internal/login", srv.internalLogin))                           // nx-account's account-link page validates Nextendo credentials here
