@@ -7,6 +7,7 @@ package main
 // A Nextendo account (its NEX PID) maps deterministically to an NPLN identity:
 //   - the account-id hex (16 hex chars, e.g. "ef43faf025ebc94e") = its BAAS/NSA id
 //   - the NPLN user id "u-<base32>"     (e.g. "u-qoahvkaf4bclq6uqu6in")
+//
 // Both derive from the PID (like the na/baas ids), so every NPLN service — auth,
 // friends, presence, cloud-save — agrees on the same identity without shared state.
 
@@ -39,11 +40,16 @@ func nplnUserID(pid uint64) string {
 }
 
 type nplnFriendEntry struct {
-	PID        uint64         `json:"pid"`
-	UserID     string         `json:"user_id"`
-	AccountHex string         `json:"account_hex"`
-	Name       string         `json:"name"`
-	Presence   map[string]any `json:"presence"`
+	PID        uint64 `json:"pid"`
+	UserID     string `json:"user_id"`
+	AccountHex string `json:"account_hex"`
+	Name       string `json:"name"`
+	// Favorite mirrors the star the player set on this friend. NPLN carries it in
+	// FriendUser.Relationship.favorite, and Splatoon 3 sorts and filters on it —
+	// without it every friend looks unstarred in game while the website shows the
+	// star.
+	Favorite bool           `json:"favorite"`
+	Presence map[string]any `json:"presence"`
 }
 
 func nplnPresence(pid uint64) map[string]any {
@@ -86,7 +92,25 @@ func (s *server) internalNplnFriends(w http.ResponseWriter, r *http.Request) {
 			UserID:     nplnUserID(fpid),
 			AccountHex: nplnAccountHex(fpid),
 			Name:       displayName(f),
+			Favorite:   hasFavoritePID(acct, fpid),
 			Presence:   nplnPresence(fpid),
+		})
+	}
+	// Blocked users, in the same shape. NPLN has a Friends.ListBlockingUsers RPC,
+	// and a game that cannot read the block list will happily match a player with
+	// somebody they blocked. Previously not published at all, so the NPLN side had
+	// to answer an empty list.
+	blocked := make([]nplnFriendEntry, 0, len(acct.Blocked))
+	for _, bpid := range acct.Blocked {
+		b, err := s.store.ByPID(bpid)
+		if err != nil {
+			continue
+		}
+		blocked = append(blocked, nplnFriendEntry{
+			PID:        bpid,
+			UserID:     nplnUserID(bpid),
+			AccountHex: nplnAccountHex(bpid),
+			Name:       displayName(b),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -97,5 +121,6 @@ func (s *server) internalNplnFriends(w http.ResponseWriter, r *http.Request) {
 		// Nextendo account (fail-closed identity — same rule as the NEX games).
 		"verified": acct.EmailVerified && !acct.Disabled,
 		"friends":  friends,
+		"blocked":  blocked,
 	})
 }
